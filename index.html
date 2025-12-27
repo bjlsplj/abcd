@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>高德能源雷达 (原生注入版)</title>
+    <style>
+        /* 保持之前的漂亮 UI */
+        :root { --primary: #00E5FF; --bg: #121212; --panel: #1E1E1E; }
+        body { margin: 0; background: var(--bg); color: #fff; font-family: -apple-system, sans-serif; overflow: hidden; }
+        #container { width: 100%; height: 100%; position: absolute; }
+        
+        /* 简化的 UI 样式，确保不喧宾夺主 */
+        .modal { position: fixed; inset: 0; background: #000; z-index: 9999; display: flex; flex-direction: column; justify-content: center; padding: 20px; }
+        .hidden { display: none !important; }
+        .inp { background: #333; border: 1px solid #555; color: #fff; padding: 15px; margin-bottom: 15px; width: 100%; border-radius: 8px; font-size: 16px; box-sizing: border-box; }
+        .btn { background: var(--primary); color: #000; border: none; padding: 15px; width: 100%; border-radius: 8px; font-size: 18px; font-weight: bold; }
+        
+        .hud { position: absolute; z-index: 100; pointer-events: none; width: 100%; padding: 20px; box-sizing: border-box; }
+        .top { top: 0; display: flex; justify-content: space-between; background: linear-gradient(to bottom, rgba(0,0,0,0.8), transparent); }
+        .bot { bottom: 0; background: linear-gradient(to top, rgba(0,0,0,0.9), transparent); pointer-events: auto; }
+        
+        .type-switch { display: flex; gap: 10px; margin-top: 10px; }
+        .type-btn { flex: 1; padding: 15px; background: #333; border: 1px solid #444; color: #aaa; border-radius: 8px; font-weight: bold; }
+        .type-btn.active { background: var(--primary); color: #000; border-color: var(--primary); }
+        
+        /* 标记点 */
+        .amap-marker-content { white-space: nowrap; }
+        .custom-marker { background: #fff; color: #333; padding: 5px 10px; border-radius: 4px; box-shadow: 0 2px 5px rgba(0,0,0,0.5); font-size: 12px; font-weight: bold; position: relative; top: -10px; }
+        .custom-marker::after { content: ''; position: absolute; bottom: -5px; left: 50%; transform: translateX(-50%); border-width: 5px 5px 0; border-style: solid; border-color: #fff transparent transparent; }
+    </style>
+</head>
+<body>
+
+    <!-- 输入层 -->
+    <div id="setup" class="modal">
+        <h2 style="text-align:center; margin-bottom: 30px;">雷达配置 (原生注入)</h2>
+        <p style="color:#aaa; font-size:12px; margin-bottom:10px">由于 API 加载器兼容性问题，我们将采用原生标签注入方式。</p>
+        <input type="text" id="k" class="inp" placeholder="Key (32位 Web端 JS API)">
+        <input type="text" id="s" class="inp" placeholder="安全密钥 (Security Code)">
+        <button class="btn" onclick="injectAndStart()">启动系统</button>
+        <div id="status" style="margin-top:20px; color:#ff4d4f; font-size:12px;"></div>
+    </div>
+
+    <!-- 地图 -->
+    <div id="container"></div>
+
+    <!-- 界面 -->
+    <div class="hud top">
+        <h3 style="margin:0; color:var(--primary)">ENERGY RADAR</h3>
+        <button onclick="clearCreds()" style="pointer-events:auto; background:rgba(255,255,255,0.2); border:none; color:#fff; padding:5px 10px; border-radius:4px;">重置</button>
+    </div>
+
+    <div class="hud bot">
+        <div style="color:#aaa; font-size:12px; margin-bottom:5px">资源类型</div>
+        <div class="type-switch">
+            <button class="type-btn active" id="btn-ev" onclick="changeType('ev')">⚡ 充电桩</button>
+            <button class="type-btn" id="btn-gas" onclick="changeType('gas')">⛽ 加油站</button>
+        </div>
+    </div>
+
+    <script>
+        // 不引用 Loader.js，纯原生 JS
+        let map, ps, activeType = 'ev';
+        
+        // 页面加载回填
+        window.onload = () => {
+            const k = localStorage.getItem('raw_k');
+            const s = localStorage.getItem('raw_s');
+            if(k && s) {
+                document.getElementById('k').value = k;
+                document.getElementById('s').value = s;
+                injectAndStart();
+            }
+        };
+
+        function clearCreds() {
+            localStorage.clear();
+            location.reload();
+        }
+
+        function injectAndStart() {
+            const key = document.getElementById('k').value.trim();
+            const sec = document.getElementById('s').value.trim();
+            const statusDiv = document.getElementById('status');
+
+            if(key.length !== 32) {
+                statusDiv.innerText = "Key 格式错误，必须是 32 位字符";
+                return;
+            }
+
+            // 保存
+            localStorage.setItem('raw_k', key);
+            localStorage.setItem('raw_s', sec);
+            statusDiv.innerText = "正在注入地图脚本...";
+            statusDiv.style.color = "#00E5FF";
+
+            // -----------------------------------------------------------
+            // 核心修复：手动注入逻辑 (The Fix)
+            // -----------------------------------------------------------
+            
+            // 1. 绝对优先：设置安全配置
+            // 直接挂载到 window，没有任何函数作用域的干扰
+            window._AMapSecurityConfig = {
+                securityJsCode: sec
+            };
+
+            // 2. 检测是否已经加载过 (防止重复点击)
+            if(window.AMap) {
+                initMapLogic();
+                return;
+            }
+
+            // 3. 创建 Script 标签
+            const script = document.createElement('script');
+            script.type = 'text/javascript';
+            // 拼接 URL，包含必要的插件，一次性加载
+            // plugin 参数很重要，直接把需要用的插件名字写进去
+            script.src = `https://webapi.amap.com/maps?v=2.0&key=${key}&plugin=AMap.Geolocation,AMap.PlaceSearch,AMap.MoveAnimation`;
+            
+            // 4. 监听加载完成
+            script.onload = () => {
+                statusDiv.innerText = "脚本下载完成，初始化地图...";
+                // 稍微延时一点点，给高德内部初始化留 50ms
+                setTimeout(initMapLogic, 50);
+            };
+
+            // 5. 监听加载失败 (网络错误)
+            script.onerror = () => {
+                statusDiv.innerText = "❌ 脚本下载失败，请检查网络或 Key";
+                statusDiv.style.color = "red";
+                localStorage.clear(); // 可能是 Key 导致被拒
+            };
+
+            // 6. 插入到 Head，触发浏览器下载
+            document.head.appendChild(script);
+        }
+
+        function initMapLogic() {
+            try {
+                // 如果 Key 错误，这里 new Map 会直接抛出异常
+                map = new AMap.Map('container', {
+                    viewMode: '3D',
+                    zoom: 16,
+                    pitch: 60,
+                    mapStyle: 'amap://styles/darkblue',
+                    showBuildingBlock: false
+                });
+
+                // 监听鉴权失败 (Key/Sec 不匹配)
+                map.on('error', (e) => {
+                    console.error(e);
+                    document.getElementById('status').innerText = "❌ 鉴权失败！Key或密钥错误";
+                    document.getElementById('status').style.color = "red";
+                    alert("高德鉴权失败。\n请确认 Key 类型为 [Web端 JS API]，且不要设置域名白名单。");
+                    clearCreds();
+                });
+
+                // 加载成功，隐藏配置层
+                map.on('complete', () => {
+                    document.getElementById('setup').classList.add('hidden');
+                    startLocation();
+                });
+
+            } catch (err) {
+                console.error(err);
+                alert("初始化崩溃: " + err.message);
+                clearCreds();
+            }
+        }
+
+        function startLocation() {
+            const geo = new AMap.Geolocation({
+                enableHighAccuracy: true,
+                timeout: 10000,
+                needAddress: false,
+                buttonPosition: 'RB'
+            });
+
+            // 初始化搜索
+            ps = new AMap.PlaceSearch({ type: '011100' }); // 默认充电桩
+
+            map.addControl(geo);
+            geo.getCurrentPosition((status, result) => {
+                if(status === 'complete') {
+                    const pos = result.position;
+                    map.setCenter(pos);
+                    doSearch(pos); // 初始搜索
+                    
+                    // 持续定位
+                    geo.watchPosition();
+                    AMap.event.addListener(geo, 'complete', (data) => {
+                         // 简单的跟随逻辑
+                         map.setCenter(data.position);
+                         if(data.speed > 10) map.setRotation(-data.heading);
+                    });
+                } else {
+                    alert("定位失败: " + result.message + "\n(如果是 file:// 协议请换成 https)");
+                }
+            });
+        }
+
+        function changeType(type) {
+            activeType = type;
+            document.querySelectorAll('.type-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById('btn-' + type).classList.add('active');
+            
+            const code = type === 'ev' ? '011100' : '010100';
+            ps.setType(code);
+            
+            // 重新搜索当前中心点
+            doSearch(map.getCenter());
+        }
+
+        function doSearch(center) {
+            ps.searchNearBy('', center, 5000, (status, result) => {
+                map.clearMap(); // 清除覆盖物
+                if(status === 'complete' && result.info === 'OK') {
+                    result.poiList.pois.forEach(poi => {
+                        const content = `<div class="custom-marker">${poi.name}</div>`;
+                        const marker = new AMap.Marker({
+                            position: poi.location,
+                            content: content,
+                            offset: new AMap.Pixel(0, 0)
+                        });
+                        marker.on('click', () => {
+                            location.href = `https://uri.amap.com/navigation?to=${poi.location.lng},${poi.location.lat},${poi.name}&mode=car&callnative=1`;
+                        });
+                        map.add(marker);
+                    });
+                }
+            });
+        }
+    </script>
+</body>
+</html>
